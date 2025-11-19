@@ -12,6 +12,18 @@ import pickle
 import requests
 from PIL import Image
 
+# Load .env automatically
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Try to load a .env file located next to this script (repo root)
+_env_path = Path(__file__).resolve().parent / ".env"
+if _env_path.exists():
+    load_dotenv(dotenv_path=_env_path)
+else:
+    # fallback to default behavior (search up the path)
+    load_dotenv()
+
 # -------------------------
 # Config
 # -------------------------

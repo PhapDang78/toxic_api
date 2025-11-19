@@ -6,3 +6,4 @@ pandas
 requests
 pillow
 python-multipart
+python-dotenv
