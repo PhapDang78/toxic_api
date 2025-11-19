@@ -16,8 +16,8 @@ class InputText(BaseModel):
     text: str
 
 @app.post("/predict")
-def predict(data: PredictRequest):
-    text = data.input
+def predict(data: InputText):
+    text = data.text
 
     # Transform text → vector
     X = vectorizer.transform([text])
