@@ -3,3 +3,6 @@ uvicorn
 scikit-learn
 numpy
 pandas
+requests
+pillow
+python-multipart
