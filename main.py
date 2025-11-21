@@ -1,5 +1,4 @@
 import os
-import pickle
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,6 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
+# --- THƯ VIỆN TRANSFORMER ---
+import torch
+import torch.nn.functional as F
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
 # -------------------------
 # 1. Setup & Config
 # -------------------------
@@ -16,14 +20,11 @@ from dotenv import load_dotenv
 _env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=_env_path if _env_path.exists() else None)
 
-MODEL_PATH = "model.pkl"
-VECTORIZER_PATH = "vectorizer.pkl"
+# Mô hình Transformer mạnh hơn cho Tiếng Việt
+MODEL_NAME = "jesse-tong/vietnamese_hate_speech_detection_phobert"
 
-# Label mapping
-# Tùy thuộc vào model của bạn, bạn có thể chỉ có 0: clean, 1: toxic
+# Cấu hình nhãn (Cần kiểm tra lại nếu mô hình có nhiều hơn 2 nhãn)
 LABELS = {0: "clean", 1: "toxic"} 
-
-# Biến chứa model global
 ml_models = {}
 
 # -------------------------
@@ -31,21 +32,19 @@ ml_models = {}
 # -------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load model Text khi khởi động server."""
-    print("\n[STARTUP] Đang load model Text AI...")
+    """Load mô hình PhoBERT khi khởi động server."""
+    print("\n[STARTUP] Đang load mô hình PhoBERT Transformer...")
     try:
-        if os.path.exists(MODEL_PATH) and os.path.exists(VECTORIZER_PATH):
-            with open(MODEL_PATH, "rb") as f:
-                ml_models["model"] = pickle.load(f)
-            with open(VECTORIZER_PATH, "rb") as f:
-                ml_models["vectorizer"] = pickle.load(f)
-            print("[STARTUP] ✅ Model & Vectorizer đã load thành công!")
-        else:
-            print(f"[STARTUP] ⚠️ Không tìm thấy {MODEL_PATH} hoặc {VECTORIZER_PATH}. Server sẽ hoạt động nhưng chức năng dự đoán sẽ báo lỗi.")
+        # Tải Tokenizer và Model
+        ml_models["tokenizer"] = AutoTokenizer.from_pretrained(MODEL_NAME)
+        # Sử dụng AutoModelForSequenceClassification cho nhiệm vụ phân loại
+        ml_models["model"] = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
+        ml_models["model"].eval() # Đặt model ở chế độ đánh giá
+        print(f"[STARTUP] ✅ PhoBERT ({MODEL_NAME}) đã load thành công!")
     except Exception as e:
-        print(f"[STARTUP] ❌ Lỗi load model: {e}")
+        print(f"[STARTUP] ❌ Lỗi load mô hình Transformer: {e}")
         ml_models["model"] = None
-        ml_models["vectorizer"] = None
+        ml_models["tokenizer"] = None
     
     yield
     
@@ -56,8 +55,8 @@ async def lifespan(app: FastAPI):
 # 3. Khởi tạo FastAPI
 # -------------------------
 app = FastAPI(
-    title="Toxic Text Moderation API",
-    description="API đơn giản hóa, chỉ xử lý phân loại Ngôn ngữ Độc hại.",
+    title="Toxic Text Moderation API (PhoBERT)",
+    description="API chỉ xử lý phân loại Ngôn ngữ Độc hại tiếng Việt bằng mô hình Transformer.",
     version="1.0",
     lifespan=lifespan
 )
@@ -81,46 +80,50 @@ class TextResponse(BaseModel):
     label_id: int
     label: str
     scores: dict
-    processing_time: float # Thêm thời gian xử lý
+    processing_time: float 
 
 # -------------------------
 # 5. Hàm xử lý Logic (Core)
 # -------------------------
 
 def predict_text_logic(text: str):
-    """Xử lý text classification."""
+    """Xử lý text classification bằng mô hình PhoBERT."""
     start_time = time.time()
     model = ml_models.get("model")
-    vectorizer = ml_models.get("vectorizer")
+    tokenizer = ml_models.get("tokenizer")
 
-    if not model or not vectorizer:
-        raise RuntimeError("Model phân loại ngôn ngữ chưa được load.")
+    if not model or not tokenizer:
+        raise RuntimeError("Mô hình phân loại ngôn ngữ chưa được load.")
 
-    X = vectorizer.transform([text])
-    pred = model.predict(X)[0]
+    # 1. Mã hóa văn bản (Tokenize)
+    inputs = tokenizer(text, 
+                       return_tensors="pt", 
+                       truncation=True, 
+                       padding=True, 
+                       max_length=128) # Giới hạn độ dài token
 
-    try:
-        # Lấy xác suất của từng lớp
-        proba = model.predict_proba(X)[0].tolist()
-    except Exception:
-        proba = None
+    # 2. Dự đoán (không cần tính gradient)
+    with torch.no_grad():
+        outputs = model(**inputs)
         
+    # 3. Tính xác suất (Softmax)
+    # Lấy xác suất của từng lớp
+    probs = F.softmax(outputs.logits, dim=1)[0]
+    
+    # 4. Lấy nhãn dự đoán
+    pred_idx = torch.argmax(probs).item()
+
     scores = {}
-    if proba:
-        for i, p in enumerate(proba):
-            label_name = LABELS.get(i, str(i))
-            scores[label_name] = round(float(p), 4) # Làm tròn 4 chữ số
-    else:
-        # Trường hợp không có predict_proba (rất hiếm)
-        for i in LABELS:
-            scores[LABELS[i]] = float(1.0 if i == int(pred) else 0.0)
+    for i, p in enumerate(probs.tolist()):
+        label_name = LABELS.get(i, str(i))
+        scores[label_name] = round(float(p), 4)
 
     total_time = time.time() - start_time
     
     return {
         "input": text,
-        "label_id": int(pred),
-        "label": LABELS.get(int(pred), "unknown"),
+        "label_id": pred_idx,
+        "label": LABELS.get(pred_idx, "unknown"),
         "scores": scores,
         "processing_time": round(total_time, 4)
     }
@@ -137,7 +140,7 @@ def health():
         "model_loaded": ml_models.get("model") is not None
     }
 
-@app.post("/predict", response_model=TextResponse) # Đổi tên endpoint thành /predict
+@app.post("/predict", response_model=TextResponse)
 def predict_text_endpoint(body: TextRequest):
     """
     Endpoint chính để dự đoán nhãn độc hại của văn bản.
@@ -146,12 +149,16 @@ def predict_text_endpoint(body: TextRequest):
     try:
         return predict_text_logic(body.text)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        # Lỗi 503 nếu model chưa load thành công
+        raise HTTPException(status_code=503, detail=str(e)) 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi không xác định: {str(e)}")
+        # Lỗi 500 cho các lỗi không xác định
+        print(f"Lỗi dự đoán: {e}")
+        raise HTTPException(status_code=500, detail=f"Lỗi máy chủ khi dự đoán: {str(e)}")
 
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.getenv("PORT", 3000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
