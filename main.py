@@ -153,6 +153,5 @@ def predict_text_endpoint(body: TextRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    # Chạy trên port 5000 (hoặc PORT trong .env)
     port = int(os.getenv("PORT", 3000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
